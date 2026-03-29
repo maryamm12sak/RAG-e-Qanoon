@@ -1,0 +1,1 @@
+scrapper/data/raw/*.pdf filter=lfs diff=lfs merge=lfs -text
