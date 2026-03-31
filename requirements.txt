@@ -5,3 +5,8 @@ webdriver_manager
 streamlit
 pymongo 
 certifi
+paddlepaddle 
+paddleocr 
+Pillow 
+numpy
+fitz

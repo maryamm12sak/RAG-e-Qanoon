@@ -38,7 +38,7 @@ EMBEDDING_DIM        = 1024
 # CrossEncoder for re-ranking
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
-PINECONE_INDEX_NAME  = "legal-urdu-rag"
+PINECONE_INDEX_NAME  = "legal-urdu-rag-v2"
 
 # Chunking settings
 FIXED_CHUNK_SIZE        = 300
@@ -88,55 +88,68 @@ def load_api_keys() -> Tuple[str, str]:
 # ─────────────────────────────────────────────
 # 4. LOAD YOUR REAL DATA FROM scrapper/data/raw
 # ─────────────────────────────────────────────
+from typing import List, Dict, Tuple
+import os
+import glob
+
 def load_documents_from_folder(folder_path: str) -> Tuple[List[str], List[Dict]]:
     """
-    Reads all PDF files from the given folder and returns:
-      - texts:    list of extracted text strings (one per file)
-      - metadata: list of dicts with source filename info
-
-    Requires: pip install pypdf
+    Reads PDFs using EasyOCR for Urdu (Nastaliq) text.
+    Uses pdf2image to convert pages to high-DPI images.
     """
-    from pypdf import PdfReader
+    import numpy as np
+    import easyocr
+    from pdf2image import convert_from_path
 
-    texts    = []
+    # Initialize EasyOCR for Urdu + English (handles mixed pages)
+    print("Loading Urdu OCR Engine...")
+    reader = easyocr.Reader(['ur', 'en'], gpu=False)  # set gpu=True if available
+
+    texts = []
     metadata = []
 
     pdf_files = sorted(glob.glob(os.path.join(folder_path, "*.pdf")))
-
     if not pdf_files:
-        raise FileNotFoundError(
-            f"No PDF files found in '{folder_path}'. "
-            "Make sure the path is correct and PDFs exist."
-        )
+        raise FileNotFoundError(f"No PDF files found in '{folder_path}'.")
 
-    print(f"Found {len(pdf_files)} PDF files in '{folder_path}'")
+    print(f"Found {len(pdf_files)} PDF files. Starting OCR...")
 
     for pdf_path in pdf_files:
         filename = os.path.basename(pdf_path)
         try:
-            reader    = PdfReader(pdf_path)
-            full_text = "\n".join(
-                page.extract_text() or "" for page in reader.pages
-            ).strip()
+            print(f"  Converting {filename} to images...")
+            # 250 DPI — critical for Nastaliq ligatures
+            pages = convert_from_path(
+    pdf_path,
+    dpi=250,
+    poppler_path=r"C:\Uni stuff\Uni stuff\NLP\project\RAG-e-Qanoon\rag_backend\poppler-25.12.0\Library\bin"
+)
+            full_text = ""
 
-            if full_text:
+            for page_num, page_img in enumerate(pages):
+                print(f"    OCR on page {page_num + 1}/{len(pages)}...")
+                img_array = np.array(page_img)
+
+                # paragraph=True groups text into reading-order blocks
+                result = reader.readtext(img_array, paragraph=True)
+
+                if result:
+                    # Each result: (bbox, text, confidence)
+                    page_text = "\n".join([item[1] for item in result])
+                    full_text += page_text + "\n\n"
+
+            if len(full_text.strip()) > 50:
                 texts.append(full_text)
-                metadata.append({
-                    "source":   filename,
-                    "filepath": pdf_path,
-                    "pages":    len(reader.pages),
-                })
-                print(f"  ✓ Loaded: {filename} ({len(reader.pages)} pages, {len(full_text)} chars)")
+                metadata.append({"source": filename, "pages": len(pages)})
+                print(f"  ✓ Done: {filename}")
             else:
-                print(f"  ⚠ Skipped (no text extracted): {filename}")
+                print(f"  ⚠ No text found: {filename}")
 
         except Exception as e:
-            print(f"  ✗ Error reading {filename}: {e}")
+            print(f"  ✗ Error in {filename}: {e}")
 
-    print(f"\nTotal documents loaded: {len(texts)}")
+    print(f"\nTotal documents OCR'd: {len(texts)}")
     return texts, metadata
-
-
 # ─────────────────────────────────────────────
 # 5. CHUNKING STRATEGIES
 # ─────────────────────────────────────────────
@@ -844,8 +857,8 @@ if __name__ == "__main__":
     rag.ingest_documents(texts, metadata=metadata)
 
     # ── Run a sample query ──
-    MY_QUERY = "ایف آئی آر درج کروانے کا قانونی طریقہ کیا ہے؟" 
-# (What is the legal procedure to file an FIR?)"  # Change this to your question
+    MY_QUERY = "پاکستان کا ریاستی مذہب کیا ہے اور آئین کے تحت شہریوں کے بنیادی حقوق کیا ہیں؟"
+# (What is the state religion of Pakistan and what are the fundamental rights of citizens under the constitution?)
 
     result = rag.query(MY_QUERY, run_evaluation=True)
 
