@@ -86,69 +86,25 @@ def load_api_keys() -> Tuple[str, str]:
 
 
 # ─────────────────────────────────────────────
-# 4. LOAD YOUR REAL DATA FROM scrapper/data/raw
+# 4. LOAD CLEANED JSON DATA (Instant Load)
 # ─────────────────────────────────────────────
-from typing import List, Dict, Tuple
-import os
-import glob
-
-def load_documents_from_folder(folder_path: str) -> Tuple[List[str], List[Dict]]:
+def load_documents_from_json(json_path: str) -> Tuple[List[str], List[Dict]]:
     """
-    Reads PDFs using EasyOCR for Urdu (Nastaliq) text.
-    Uses pdf2image to convert pages to high-DPI images.
+    Instantly loads the pre-processed, cleaned Urdu text from JSON.
+    No OCR happens here!
     """
-    import numpy as np
-    import easyocr
-    from pdf2image import convert_from_path
+    print(f"Loading pre-processed documents from {json_path}...")
+    
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Could not find {json_path}. Run clean_text.py first!")
 
-    # Initialize EasyOCR for Urdu + English (handles mixed pages)
-    print("Loading Urdu OCR Engine...")
-    reader = easyocr.Reader(['ur', 'en'], gpu=False)  # set gpu=True if available
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    texts = []
-    metadata = []
-
-    pdf_files = sorted(glob.glob(os.path.join(folder_path, "*.pdf")))
-    if not pdf_files:
-        raise FileNotFoundError(f"No PDF files found in '{folder_path}'.")
-
-    print(f"Found {len(pdf_files)} PDF files. Starting OCR...")
-
-    for pdf_path in pdf_files:
-        filename = os.path.basename(pdf_path)
-        try:
-            print(f"  Converting {filename} to images...")
-            # 250 DPI — critical for Nastaliq ligatures
-            pages = convert_from_path(
-    pdf_path,
-    dpi=250,
-    poppler_path=r"C:\Uni stuff\Uni stuff\NLP\project\RAG-e-Qanoon\rag_backend\poppler-25.12.0\Library\bin"
-)
-            full_text = ""
-
-            for page_num, page_img in enumerate(pages):
-                print(f"    OCR on page {page_num + 1}/{len(pages)}...")
-                img_array = np.array(page_img)
-
-                # paragraph=True groups text into reading-order blocks
-                result = reader.readtext(img_array, paragraph=True)
-
-                if result:
-                    # Each result: (bbox, text, confidence)
-                    page_text = "\n".join([item[1] for item in result])
-                    full_text += page_text + "\n\n"
-
-            if len(full_text.strip()) > 50:
-                texts.append(full_text)
-                metadata.append({"source": filename, "pages": len(pages)})
-                print(f"  ✓ Done: {filename}")
-            else:
-                print(f"  ⚠ No text found: {filename}")
-
-        except Exception as e:
-            print(f"  ✗ Error in {filename}: {e}")
-
-    print(f"\nTotal documents OCR'd: {len(texts)}")
+    texts = [item["text"] for item in data]
+    metadata = [item["meta"] for item in data]
+    
+    print(f"Successfully loaded {len(texts)} documents into memory.")
     return texts, metadata
 # ─────────────────────────────────────────────
 # 5. CHUNKING STRATEGIES
@@ -836,19 +792,17 @@ class RAGPipeline:
         return self.pinecone_db.get_stats()
 
 
+
 # ─────────────────────────────────────────────
 # 14. MAIN - RUNS WHEN YOU EXECUTE THIS FILE
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
 
-    # ── Load your real PDF data ──
-    # Point this to your actual folder
-    # ── Load your real PDF data ──
-    # Point this to your actual folder (going up one level)
-    DATA_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scrapper", "data", "raw")
-
-    print(f"\nLoading documents from: {DATA_FOLDER}")
-    texts, metadata = load_documents_from_folder(DATA_FOLDER)
+    # ── Load your CLEANED JSON data ──
+    # Point this to your cleaned_ocr_output.json file
+    JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scrapper", "cleaned_ocr_output.json")
+    print(f"Loading documents from: {JSON_PATH}")
+    texts, metadata = load_documents_from_json(JSON_PATH)
 
     # ── Initialize the pipeline ──
     rag = RAGPipeline(model_choice="qwen", chunking_strategy="recursive")
@@ -858,8 +812,8 @@ if __name__ == "__main__":
 
     # ── Run a sample query ──
     MY_QUERY = "پاکستان کا ریاستی مذہب کیا ہے اور آئین کے تحت شہریوں کے بنیادی حقوق کیا ہیں؟"
-# (What is the state religion of Pakistan and what are the fundamental rights of citizens under the constitution?)
-
+    
+    # ... (keep the rest of your print statements the same)
     result = rag.query(MY_QUERY, run_evaluation=True)
 
     print("\n" + "="*60)
