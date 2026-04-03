@@ -1,63 +1,30 @@
 import streamlit as st
 import uuid
 import os
-import certifi
-import streamlit as st
-from pymongo import MongoClient
+import json
+from rag_backend.rag_pipeline import RAGPipeline
 from dotenv import load_dotenv
 
 # --- LOAD ENVIRONMENT VARIABLES ---
-# 1. Get the directory where main.py is located (Frontend folder)
 current_dir = os.path.dirname(os.path.abspath(__file__))
-# 2. Go up one level to the main project folder (RAG-e-Qanoon)
 root_dir = os.path.dirname(current_dir)
-# 3. Point directly to the .env file
 env_path = os.path.join(root_dir, '.env')
-
-# Load the .env file from that specific path
 load_dotenv(dotenv_path=env_path)
 
-# Fetch the URI
-MONGO_URL = os.getenv("MONGO_URL")
-
-# Print to terminal to verify (Remove or comment this out before final submission for security!)
-print(f"DEBUG - Loaded MONGO_URI: {MONGO_URL}")
-
-# --- MONGODB CONNECTION ---
-@st.cache_resource # This ensures Streamlit only connects once to save resources
-def init_connection():
-    if not MONGO_URL:
-        raise ValueError("MONGO_URI not found. Check your .env file and path.")
-    return MongoClient(MONGO_URL, tlsCAFile=certifi.where())
-
-client = init_connection()
-db = client["UrduLegalAI"]          # Name of your database
-collection = db["chat_histories"]   # Name of the collection (table)
-
-# --- HELPER FUNCTIONS FOR MEMORY ---
+# --- IN-MEMORY CHAT STORAGE (no MongoDB) ---
 def get_all_past_chats():
-    # Grabs all past chats from DB so we can put them in the sidebar
-    cursor = collection.find({}, {"chat_id": 1, "messages": 1})
-    return {doc["chat_id"]: doc["messages"] for doc in cursor}
+    # In-memory, just return empty dict (rely on session_state)
+    return {}
 
 def load_chat(chat_id):
-    chat = collection.find_one({"chat_id": chat_id})
-    return chat["messages"] if chat else []
+    # Not used with in-memory
+    return []
 
 def save_chat(chat_id, messages):
-    collection.update_one(
-        {"chat_id": chat_id}, 
-        {"$set": {"messages": messages}}, 
-        upsert=True
-    )
+    # In-memory, no external save needed
+    pass
 
-# --- SESSION STATE (With Database Sync) ---
-# 1. Pull everything from MongoDB when the app first loads
-if "db_synced" not in st.session_state:
-    st.session_state.chat_sessions = get_all_past_chats()
-    st.session_state.db_synced = True
-
-# 2. Setup standard variables
+# --- SESSION STATE (in-memory chat storage) ---
 if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
 if "current_chat_id" not in st.session_state:
@@ -65,16 +32,26 @@ if "current_chat_id" not in st.session_state:
 if "chip_prompt" not in st.session_state:
     st.session_state.chip_prompt = None
 
-# 3. If no chat is active, pick the most recent one or start a new one
+# Create a default chat if none exists
 if not st.session_state.current_chat_id:
     if len(st.session_state.chat_sessions) > 0:
-        # Load the last active chat
         st.session_state.current_chat_id = list(st.session_state.chat_sessions.keys())[-1]
     else:
-        # Create a brand new one
         init_id = str(uuid.uuid4())
         st.session_state.chat_sessions[init_id] = []
         st.session_state.current_chat_id = init_id
+
+@st.cache_resource
+def get_rag_pipeline():
+    """Load the RAG pipeline once and cache it."""
+    json_path = os.path.join(os.path.dirname(__file__), '..', 'scrapper', 'cleaned_ocr_output.json')
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    texts = [item["text"] for item in data]
+    metadata = [item["meta"] for item in data]
+    rag = RAGPipeline(model_choice="qwen")
+    rag.ingest_documents(texts, metadata=metadata)
+    return rag
 # --- PAGE CONFIG ---
 st.set_page_config(
     page_title="پاکستان قانونی AI",
@@ -460,24 +437,27 @@ else:
 if st.session_state.chip_prompt:
     prompt = st.session_state.chip_prompt
     st.session_state.chip_prompt = None
-    
-    # We grab the memory from Streamlit's synced state
+
     current_messages = st.session_state.chat_sessions[st.session_state.current_chat_id]
-    
     current_messages.append({"role": "user", "content": prompt})
-    current_messages.append({"role": "assistant", "content": "جواب یہاں آئے گا — آپ کا RAG سسٹم یہاں جڑے گا۔"})
     
-    # SAVE IT!
+    # Get RAG pipeline and run query
+    rag = get_rag_pipeline()
+    result = rag.query(prompt, run_evaluation=False)
+    answer = result['answer']
+    
+    current_messages.append({"role": "assistant", "content": answer})
     save_chat(st.session_state.current_chat_id, current_messages)
     st.rerun()
 # --- CHAT INPUT ---
 if prompt := st.chat_input("اپنا قانونی سوال یہاں لکھیں..."):
     current_messages.append({"role": "user", "content": prompt})
-    conversation_history = ""
-    for msg in current_messages[-5:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        conversation_history += f"{role}: {msg['content']}\n"
-    # TODO: Pass 'conversation_history' + 'prompt' to your RAG pipeline
-    current_messages.append({"role": "assistant", "content": "جواب یہاں آئے گا — آپ کا RAG سسٹم یہاں جڑے گا۔"})
+    
+    # Get RAG pipeline and run query
+    rag = get_rag_pipeline()
+    result = rag.query(prompt, run_evaluation=False)
+    answer = result['answer']
+    
+    current_messages.append({"role": "assistant", "content": answer})
     save_chat(st.session_state.current_chat_id, current_messages)
     st.rerun()

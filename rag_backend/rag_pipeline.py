@@ -28,8 +28,16 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # LLM Models
 LLM_MODELS = {
-    "qwen": "Qwen/Qwen2.5-7B-Instruct",
-    "aya":  "CohereForAI/aya-23-8B",
+    # Baselines
+    "qwen":  "Qwen/Qwen2.5-7B-Instruct",
+    "aya":   "CohereForAI/aya-23-8B",
+    # New Urdu‑focused models
+    "alif":   "large-traversaal/Alif-1.0-8B-Instruct",
+    "qalb":   "enstazao/Qalb-1.0-8B-Instruct",
+    "lughaat":"muhammadnoman76/Lughaat-1.0-8B-Instruct",
+    "urdu-llama": "Khurram123/Urdu-Llama-3.2-3B-Instruct-v1",
+    "qwen3-fp8": "RedHatAI/Qwen3-8B-FP8-dynamic",
+   
 }
 
 EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
@@ -408,19 +416,25 @@ class Reranker:
 # 11. LLM GENERATION
 # ─────────────────────────────────────────────
 class LLMGenerator:
-    """Connects to HuggingFace Inference API for LLM text generation."""
+    """Connects to Ollama (local LLM) for generation."""
 
     def __init__(self, hf_token: str, model_choice: str = "qwen"):
-        if model_choice not in LLM_MODELS:
-            raise ValueError(f"model_choice must be one of: {list(LLM_MODELS.keys())}")
-
-        self.model_name   = LLM_MODELS[model_choice]
+        # Map your model names to Ollama model names
+        ollama_models = {
+            "qwen": "qwen2.5:3b",   # the model you just pulled
+            "aya":  "aya:8b",       # if you pull it later
+        }
+        self.model_name = ollama_models.get(model_choice, "qwen2.5:7b")
         self.model_choice = model_choice
-        self.client       = InferenceClient(model=self.model_name, token=hf_token)
-        print(f"LLM ready: {self.model_name}")
+        # Use Ollama's OpenAI-compatible endpoint
+        import openai
+        self.client = openai.OpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",  # required but ignored
+        )
+        print(f"LLM ready (Ollama): {self.model_name}")
 
-    def _build_generation_prompt(self, query: str,
-                                  context_chunks: List[Dict]) -> str:
+    def _build_generation_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         context_text = ""
         for i, chunk in enumerate(context_chunks, 1):
             context_text += f"\n[دستاویز {i}]:\n{chunk['text']}\n"
@@ -439,34 +453,41 @@ class LLMGenerator:
 
     def generate(self, query: str, context_chunks: List[Dict],
                  max_new_tokens: int = 400) -> Tuple[str, float]:
-        """Generate an answer. Returns (answer_text, generation_time_seconds)."""
         prompt = self._build_generation_prompt(query, context_chunks)
-        start  = time.time()
-
+        start = time.time()
         try:
-            response = self.client.chat_completion(
+            response = self.client.chat.completions.create(
+                model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=max_new_tokens,
                 temperature=0.3,
             )
-            answer = response.choices[0].message["content"].strip()
+            answer = response.choices[0].message.content.strip()
         except Exception as e:
             answer = f"[LLM Error: {str(e)}]"
-
         return answer, round(time.time() - start, 2)
-
 
 # ─────────────────────────────────────────────
 # 12. LLM-AS-A-JUDGE (Faithfulness + Relevancy)
 # ─────────────────────────────────────────────
 class LLMJudge:
-    """Automated LLM-as-a-Judge evaluation."""
+    """Automated LLM-as-a-Judge evaluation using Ollama."""
 
     def __init__(self, hf_token: str, embedding_model: EmbeddingModel,
                  judge_model: str = "qwen"):
-        self.client          = InferenceClient(model=LLM_MODELS[judge_model], token=hf_token)
+        # Map to Ollama model name
+        ollama_models = {
+            "qwen": "qwen2.5:7b",
+            "aya":  "aya:8b",
+        }
+        self.model_name = ollama_models.get(judge_model, "qwen2.5:7b")
         self.embedding_model = embedding_model
-        print(f"LLM Judge ready: {LLM_MODELS[judge_model]}")
+        import openai
+        self.client = openai.OpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+        )
+        print(f"LLM Judge ready (Ollama): {self.model_name}")
 
     def extract_claims(self, answer: str) -> List[str]:
         prompt = f"""نیچے دیے گئے جواب سے تمام حقائق اور دعوے (claims) نکالیں۔
@@ -479,14 +500,15 @@ class LLMJudge:
 دعووں کی فہرست:"""
 
         try:
-            response      = self.client.chat_completion(
+            response = self.client.chat.completions.create(
+                model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=300,
                 temperature=0.1,
             )
-            response_text = response.choices[0].message["content"]
-            lines         = response_text.strip().split("\n")
-            claims        = []
+            response_text = response.choices[0].message.content
+            lines = response_text.strip().split("\n")
+            claims = []
             for line in lines:
                 line = line.strip()
                 if line and (line[0].isdigit() or line.startswith("-")):
@@ -510,30 +532,31 @@ class LLMJudge:
 جواب (صرف ہاں یا نہیں):"""
 
         try:
-            response    = self.client.chat_completion(
+            response = self.client.chat.completions.create(
+                model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=10,
                 temperature=0.1,
             )
-            answer_text = response.choices[0].message["content"].strip().lower()
+            answer_text = response.choices[0].message.content.strip().lower()
             return any(w in answer_text for w in ["ہاں", "yes", "supported", "correct", "true", "han"])
         except Exception:
             return False
 
     def compute_faithfulness(self, answer: str, context_chunks: List[Dict]) -> Dict:
         """Full faithfulness pipeline. Returns score (0–1) + claim details."""
-        context_text  = " ".join([c["text"] for c in context_chunks])
-        claims        = self.extract_claims(answer)
+        context_text = " ".join([c["text"] for c in context_chunks])
+        claims = self.extract_claims(answer)
         verifications = [self.verify_claim(c, context_text) for c in claims]
-        supported     = sum(verifications)
-        total         = len(verifications) if verifications else 1
+        supported = sum(verifications)
+        total = len(verifications) if verifications else 1
 
         return {
-            "score":           round(supported / total, 3),
-            "claims":          claims,
-            "verifications":   verifications,
+            "score": round(supported / total, 3),
+            "claims": claims,
+            "verifications": verifications,
             "supported_count": supported,
-            "total_claims":    total,
+            "total_claims": total,
         }
 
     def generate_questions_from_answer(self, answer: str) -> List[str]:
@@ -547,16 +570,17 @@ class LLMJudge:
 1."""
 
         try:
-            response  = self.client.chat_completion(
+            response = self.client.chat.completions.create(
+                model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=200,
                 temperature=0.4,
             )
-            full_text = "1." + response.choices[0].message["content"]
-            lines     = full_text.strip().split("\n")
+            full_text = "1." + response.choices[0].message.content
+            lines = full_text.strip().split("\n")
             questions = []
             for line in lines:
-                line  = line.strip()
+                line = line.strip()
                 clean = re.sub(r"^[\d\.\)]+\s*", "", line).strip()
                 if clean and len(clean) > 5:
                     questions.append(clean)
@@ -572,7 +596,7 @@ class LLMJudge:
         if not generated_questions:
             return {"score": 0.0, "generated_questions": [], "similarities": []}
 
-        query_emb     = self.embedding_model.embed_query(original_query)
+        query_emb = self.embedding_model.embed_query(original_query)
         question_embs = self.embedding_model.embed(generated_questions)
 
         similarities = [
@@ -581,11 +605,10 @@ class LLMJudge:
         ]
 
         return {
-            "score":               round(float(np.mean(similarities)), 3) if similarities else 0.0,
+            "score": round(float(np.mean(similarities)), 3) if similarities else 0.0,
             "generated_questions": generated_questions,
-            "similarities":        similarities,
+            "similarities": similarities,
         }
-
 
 # ─────────────────────────────────────────────
 # 13. MAIN RAGPipeline CLASS
