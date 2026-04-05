@@ -1,5 +1,5 @@
 # 🇵🇰 RAG-e-Qanoon: Pakistan Legal AI ⚖️
-
+Hugging Face link:https://huggingface.co/spaces/MuhammadHamza33/RAG-e-Qanoon
 An end-to-end, AI-powered legal assistant designed to answer questions regarding Pakistani law in fluent Urdu. This project utilizes an advanced Retrieval-Augmented Generation (RAG) pipeline to ensure all answers are strictly grounded in official legal documents (PDFs), preventing hallucinations and providing reliable legal information.
 
 ## ✨ Features
