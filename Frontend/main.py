@@ -2,79 +2,11 @@ import streamlit as st
 import uuid
 import os
 import certifi
-import streamlit as st
 from pymongo import MongoClient
 from dotenv import load_dotenv
-
-# --- LOAD ENVIRONMENT VARIABLES ---
-# 1. Get the directory where main.py is located (Frontend folder)
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# 2. Go up one level to the main project folder (RAG-e-Qanoon)
-root_dir = os.path.dirname(current_dir)
-# 3. Point directly to the .env file
-env_path = os.path.join(root_dir, '.env')
-
-# Load the .env file from that specific path
-load_dotenv(dotenv_path=env_path)
-
-# Fetch the URI
-MONGO_URL = os.getenv("MONGO_URL")
-
-# Print to terminal to verify (Remove or comment this out before final submission for security!)
-print(f"DEBUG - Loaded MONGO_URI: {MONGO_URL}")
-
-# --- MONGODB CONNECTION ---
-@st.cache_resource # This ensures Streamlit only connects once to save resources
-def init_connection():
-    if not MONGO_URL:
-        raise ValueError("MONGO_URI not found. Check your .env file and path.")
-    return MongoClient(MONGO_URL, tlsCAFile=certifi.where())
-
-client = init_connection()
-db = client["UrduLegalAI"]          # Name of your database
-collection = db["chat_histories"]   # Name of the collection (table)
-
-# --- HELPER FUNCTIONS FOR MEMORY ---
-def get_all_past_chats():
-    # Grabs all past chats from DB so we can put them in the sidebar
-    cursor = collection.find({}, {"chat_id": 1, "messages": 1})
-    return {doc["chat_id"]: doc["messages"] for doc in cursor}
-
-def load_chat(chat_id):
-    chat = collection.find_one({"chat_id": chat_id})
-    return chat["messages"] if chat else []
-
-def save_chat(chat_id, messages):
-    collection.update_one(
-        {"chat_id": chat_id}, 
-        {"$set": {"messages": messages}}, 
-        upsert=True
-    )
-
-# --- SESSION STATE (With Database Sync) ---
-# 1. Pull everything from MongoDB when the app first loads
-if "db_synced" not in st.session_state:
-    st.session_state.chat_sessions = get_all_past_chats()
-    st.session_state.db_synced = True
-
-# 2. Setup standard variables
-if "chat_sessions" not in st.session_state:
-    st.session_state.chat_sessions = {}
-if "current_chat_id" not in st.session_state:
-    st.session_state.current_chat_id = None
-if "chip_prompt" not in st.session_state:
-    st.session_state.chip_prompt = None
-
-# 3. If no chat is active, pick the most recent one or start a new one
-if not st.session_state.current_chat_id:
-    if len(st.session_state.chat_sessions) > 0:
-        # Load the last active chat
-        st.session_state.current_chat_id = list(st.session_state.chat_sessions.keys())[-1]
-    else:
-        # Create a brand new one
-        init_id = str(uuid.uuid4())
-        st.session_state.chat_sessions[init_id] = []
-        st.session_state.current_chat_id = init_id
+import sys
+import time
+import html
 # --- PAGE CONFIG ---
 st.set_page_config(
     page_title="پاکستان قانونی AI",
@@ -82,7 +14,127 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- GLOBAL CSS ---
+# --- DYNAMIC PATH RESOLUTION ---
+# Get the absolute path of the directory containing main.py (Frontend)
+frontend_dir = os.path.dirname(os.path.abspath(__file__))
+# Get the root directory (RAG-e-Qanoon)
+root_dir = os.path.dirname(frontend_dir)
+# 2. ADD ROOT TO SYS.PATH
+# Now Python can "see" sibling folders like rag_backend
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
+# 3. NOW PERFORM THE IMPORT
+# Since the root is in the path, Python can find the rag_backend folder
+from rag_backend.rag_pipeline import RAGPipeline
+
+env_path = os.path.join(root_dir, '.env')
+load_dotenv(dotenv_path=env_path)
+
+# 2. Fetch the URI
+MONGO_URL = os.getenv("MONGO_URL")
+
+# --- INITIALIZE RAG BACKEND ---
+@st.cache_resource(show_spinner=False)
+def init_rag():
+    rag = RAGPipeline(chunking_strategy="fixed")
+    # Correct path to your JSON in the scrapper folder
+    json_path = os.path.join(root_dir, "scrapper", "cleaned_ocr_output.json")
+    if os.path.exists(json_path):
+        rag.load_bm25_from_json(json_path)
+    else:
+        st.warning(f"JSON not found at: {json_path}")
+    return rag
+
+# ... [Place the Import & Path Fix code from Step 1 here] ...
+
+# --- SESSION STATE ---
+if "current_page" not in st.session_state:
+    st.session_state.current_page = "chat"
+# ... [Keep your existing session state logic for chat_sessions etc.] ...
+
+# --- SIDEBAR ---
+
+# --- MAIN CONTENT AREA ---
+# if st.session_state.current_page == "dashboard":
+#     # --- PASTE CONTENT OF dashboard.py HERE ---
+#     st.title("📊 System Evaluation & Ablation Study")
+#     # ... (Tables, metrics from your dashboard.py) ...
+
+# else:
+#     # --- YOUR ORIGINAL CHAT UI CODE ---
+#     # Welcome screen, Chips, Chat bubbles, and Chat Input
+#     # ...
+    
+#     if prompt := st.chat_input("اپنا قانونی سوال یہاں لکھیں..."):
+#         # The logic we built to call rag_pipeline.query()
+#         with st.spinner("جواب تیار کیا جا رہا ہے..."):
+#             result = rag_pipeline.query(prompt, run_evaluation=False)
+#             # append result to messages and st.rerun()
+# --- MONGODB CONNECTION ---
+@st.cache_resource 
+def init_connection():
+    if not MONGO_URL:
+        st.error("MONGO_URL not found in .env file.")
+        return None
+    return MongoClient(MONGO_URL, tlsCAFile=certifi.where())
+
+client = init_connection()
+if client:
+    db = client["UrduLegalAI"]          
+    collection = db["chat_histories"]   
+
+# --- HELPER FUNCTIONS FOR MEMORY ---
+def get_all_past_chats():
+    if not client: return {}
+    cursor = collection.find({}, {"chat_id": 1, "messages": 1})
+    return {doc["chat_id"]: doc["messages"] for doc in cursor}
+
+def save_chat(chat_id, messages):
+    if not client: return
+    collection.update_one(
+        {"chat_id": chat_id}, 
+        {"$set": {"messages": messages}}, 
+        upsert=True
+    )
+def render_user_bubble(text: str):
+    safe_text = html.escape(text).replace("\n", "<br>")
+    st.markdown(f"""
+    <div class="msg-row-user animate-in">
+        <div class="user-bubble">{safe_text}</div>
+        <div class="av av-user">👤</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_typing_indicator(container):
+    container.markdown("""
+    <div class="typing-wrap">
+        <div class="av av-bot">⚖️</div>
+        <div class="typing-bubble">
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+            <span class="typing-dot"></span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def stream_assistant_bubble(container, full_text: str, delay: float = 0.012):
+    words = full_text.split()
+    shown = ""
+
+    for word in words:
+        shown = (shown + " " + word).strip()
+        safe_text = html.escape(shown).replace("\n", "<br>")
+        container.markdown(f"""
+        <div class="msg-row-bot animate-in">
+            <div class="av av-bot">⚖️</div>
+            <div class="bot-bubble">{safe_text}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        time.sleep(delay)
+
+
+# --- GLOBAL CSS (YOUR EXACT CSS) ---
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;600;700&family=Cormorant+Garamond:wght@500;600;700&display=swap');
@@ -145,8 +197,150 @@ footer { visibility: hidden; }
     font-weight: 700 !important;
     box-shadow: 0 3px 12px rgba(201,168,76,0.35) !important;
     margin-bottom: 20px !important;
+}/* Expander */
+[data-testid="stExpander"] {
+    border: 1px solid #d7e7dc !important;
+    border-radius: 16px !important;
+    background: #ffffff !important;
+    margin: 0 clamp(20px, 6vw, 100px) 14px !important;
+    overflow: hidden !important;
+    box-shadow: var(--shadow-sm) !important;
 }
 
+[data-testid="stExpander"] details {
+    background: #ffffff !important;
+}
+
+[data-testid="stExpander"] summary {
+    background: #f3f8f5 !important;
+    color: var(--green-dark) !important;
+    border-bottom: 1px solid #d7e7dc !important;
+    padding: 12px 16px !important;
+    font-weight: 600 !important;
+    border-radius: 16px 16px 0 0 !important;
+}
+
+[data-testid="stExpander"] summary:hover {
+    background: #ebf4ee !important;
+}
+
+/* Score cards */
+.score-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 8px 0 16px;
+}
+
+.score-card {
+    background: #f7fbf8;
+    border: 1px solid #d8e9dd;
+    border-radius: 14px;
+    padding: 12px 16px;
+    min-width: 170px;
+    box-shadow: var(--shadow-sm);
+}
+
+.score-label {
+    font-size: 0.82rem;
+    color: var(--gray-500);
+    margin-bottom: 4px;
+}
+
+.score-value {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--green-dark);
+}
+
+/* Chunk cards */
+.context-card {
+    background: #f8fcf9;
+    border: 1px solid #d8e9dd;
+    border-right: 4px solid var(--green-accent);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow-sm);
+    color: var(--gray-900) !important;
+    direction: rtl;
+    text-align: right;
+    line-height: 2.1;
+}
+
+.context-title {
+    font-weight: 700;
+    color: var(--green-dark);
+    margin-bottom: 6px;
+}
+
+.context-score {
+    display: inline-block;
+    background: #e8f5ed;
+    color: var(--green-dark);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 0.8rem;
+    margin-bottom: 10px;
+}
+.context-card {
+    background: #f7fbf8;
+    border: 1px solid #d8e9dd;
+    border-right: 4px solid var(--green-accent);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow-sm);
+    direction: rtl;
+    text-align: right;
+}
+
+.context-title {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 0.9rem;
+    color: var(--green-dark);
+    margin-bottom: 8px;
+    font-weight: 700;
+}
+
+.context-score {
+    display: inline-block;
+    background: var(--green-light);
+    color: var(--green-dark);
+    border: 1px solid rgba(1,65,28,0.12);
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-size: 0.8rem;
+    margin-bottom: 10px;
+}
+
+.score-row {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.score-card {
+    background: #f7fbf8;
+    border: 1px solid #d8e9dd;
+    border-radius: 14px;
+    padding: 12px 16px;
+    min-width: 180px;
+    box-shadow: var(--shadow-sm);
+}
+
+.score-label {
+    font-size: 0.82rem;
+    color: var(--gray-500);
+    margin-bottom: 4px;
+}
+
+.score-value {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--green-dark);
+}
 .sidebar-header {
     padding: 28px 18px 18px;
     border-bottom: 1px solid rgba(201,168,76,0.18);
@@ -227,7 +421,7 @@ footer { visibility: hidden; }
     line-height: 2.5;
 }
 
-/* ── Chip buttons (Streamlit buttons styled as chips) ── */
+/* ── Chip buttons ── */
 .chips-container {
     display: flex;
     flex-direction: column;
@@ -237,7 +431,6 @@ footer { visibility: hidden; }
     max-width: 680px;
     margin: 0 auto;
 }
-/* Target the chip button area specifically via a wrapper class */
 .chip-btn-row {
     display: flex;
     flex-wrap: wrap;
@@ -299,7 +492,7 @@ footer { visibility: hidden; }
 .av-user { background: linear-gradient(135deg, #01411C, #2e7d52); }
 .av-bot  { background: linear-gradient(135deg, #c9a84c, #a8873a); }
 
-/* ── Chat input strip — force cream background on every layer ── */
+/* ── Chat input strip ── */
 [data-testid="stBottom"] {
     background-color: var(--cream) !important;
     background: var(--cream) !important;
@@ -342,18 +535,70 @@ footer { visibility: hidden; }
     box-shadow: 0 2px 8px rgba(1,65,28,0.28) !important;
 }
 
-/* ── Scrollbar ── */
+/* ── Scrollbar & Expanders ── */
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: rgba(1,65,28,0.15); border-radius: 10px; }
+[data-testid="stExpander"] { background-color: var(--white); border-radius: 10px; border: 1px solid var(--gray-200); margin: 0 clamp(20px, 6vw, 100px) 12px; }
+/* ── Animations ── */
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes blinkDots {
+    0%, 20%   { opacity: 0.25; transform: translateY(0); }
+    50%       { opacity: 1; transform: translateY(-2px); }
+    100%      { opacity: 0.25; transform: translateY(0); }
+}
+
+.animate-in {
+    animation: fadeUp 0.35s ease-out;
+}
+
+.typing-wrap {
+    display: flex;
+    justify-content: flex-start;
+    align-items: flex-end;
+    gap: 10px;
+    margin: 12px 0;
+    padding: 0 clamp(20px, 6vw, 100px);
+    animation: fadeUp 0.25s ease-out;
+}
+
+.typing-bubble {
+    background: var(--white);
+    border: 1px solid var(--gray-200);
+    border-radius: 22px 22px 22px 4px;
+    padding: 14px 18px;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 72px;
+}
+
+.typing-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green-accent);
+    display: inline-block;
+    animation: blinkDots 1.2s infinite ease-in-out;
+}
+
+.typing-dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-dot:nth-child(3) { animation-delay: 0.3s; }
 </style>
 """, unsafe_allow_html=True)
+
+# --- INITIALIZE PIPELINE ---
+rag_pipeline = init_rag()
 
 # --- SESSION STATE ---
 if "db_synced" not in st.session_state:
     st.session_state.chat_sessions = get_all_past_chats()
     st.session_state.db_synced = True
 
-# 2. Setup standard variables
 if "chat_sessions" not in st.session_state:
     st.session_state.chat_sessions = {}
 if "current_chat_id" not in st.session_state:
@@ -361,16 +606,14 @@ if "current_chat_id" not in st.session_state:
 if "chip_prompt" not in st.session_state:
     st.session_state.chip_prompt = None
 
-# 3. If no chat is active, pick the most recent one or start a new one
 if not st.session_state.current_chat_id:
     if len(st.session_state.chat_sessions) > 0:
-        # Load the last active chat
         st.session_state.current_chat_id = list(st.session_state.chat_sessions.keys())[-1]
     else:
-        # Create a brand new one
         init_id = str(uuid.uuid4())
         st.session_state.chat_sessions[init_id] = []
         st.session_state.current_chat_id = init_id
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.markdown("""
@@ -407,12 +650,16 @@ with st.sidebar:
 current_messages = st.session_state.chat_sessions[st.session_state.current_chat_id]
 
 CHIPS = [
-    "🏛️ آئین پاکستان کے بنیادی حقوق",
-    "⚖️ ایف آئی آر کیسے درج کریں؟",
-    "🏠 کرایہ دار کے حقوق",
-    "👨‍👩‍👧 خاندانی قانون",
-    "💼 ملازمت کے حقوق",
-    "📄 دستاویزات اور تصدیق",
+    "پاکستان کا ریاستی مذہب کیا ہے؟",
+    "پاکستان میں قومی اسمبلی کی مدت کتنی ہے؟",
+    "اگر کسی شخص کو غلط طریقے سے گرفتار کیا جائے تو اسے کیا حقوق حاصل ہیں؟",
+    "انسانی عزت کے بارے میں پاکستان کے آئین میں کیا کہا گیا ہے؟",
+    "وزیر اعظم کو برطرف کرنے کے لیے کیا طریقہ کار ہے؟",
+    "پاکستان میں جنگ کی صورت میں کیا ہوتا ہے؟ حکومت کو کیا اختیارات مل جاتے ہیں؟",
+    "عدالت عظمیٰ براہ راست کوئی مقدمہ سن سکتی ہے یا پہلے نچلی عدالت میں جانا ضروری ہے؟",
+    "وفاقی شرعی عدالت کیا کام کرتی ہے؟",
+    "پاکستان کا ریاستی مذہب کیا ہے اور یہ آئین میں کہاں لکھا ہے؟",
+    "عدالت عظمیٰ کے جج کب ریٹائر ہوتے ہیں؟"
 ]
 
 if len(current_messages) == 0:
@@ -428,56 +675,119 @@ if len(current_messages) == 0:
     </div>
     """, unsafe_allow_html=True)
 
-    # Clickable chip buttons rendered in a flex row via custom class
     st.markdown('<div class="chip-btn-row">', unsafe_allow_html=True)
-    cols = st.columns(len(CHIPS))
-    for i, chip in enumerate(CHIPS):
-        with cols[i]:
-            if st.button(chip, key=f"chip_{i}"):
-                st.session_state.chip_prompt = chip
+    for i in range(0, len(CHIPS), 2):
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button(CHIPS[i], key=f"chip_{i}", use_container_width=True):
+                st.session_state.chip_prompt = CHIPS[i]
                 st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-
+        if i + 1 < len(CHIPS):
+            with cols[1]:
+                if st.button(CHIPS[i+1], key=f"chip_{i+1}", use_container_width=True):
+                    st.session_state.chip_prompt = CHIPS[i+1]
+                    st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 else:
     st.markdown('<div style="height:20px"></div>', unsafe_allow_html=True)
     for message in current_messages:
         if message["role"] == "user":
             st.markdown(f"""
-            <div class="msg-row-user">
+            <div class="msg-row-user animate-in">
                 <div class="user-bubble">{message["content"]}</div>
                 <div class="av av-user">👤</div>
             </div>
             """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
-            <div class="msg-row-bot">
+<div class="msg-row-bot animate-in">
                 <div class="av av-bot">⚖️</div>
                 <div class="bot-bubble">{message["content"]}</div>
             </div>
             """, unsafe_allow_html=True)
+            
+            # Show chunks and scores if they exist
+            if message.get("chunks"):
+                with st.expander("📊 Evaluation Scores & Retrieved Context (تفصیلات)", expanded=False):
+                    f_score = message.get("faithfulness", "N/A")
+                    r_score = message.get("relevancy", "N/A")
 
-# --- # --- Handle chip click (fires after rerun) ---
+                    st.markdown(f"""
+                    <div class="score-row">
+                        <div class="score-card">
+                            <div class="score-label">Faithfulness</div>
+                            <div class="score-value">{f_score}</div>
+                        </div>
+                        <div class="score-card">
+                            <div class="score-label">Relevancy</div>
+                            <div class="score-value">{r_score}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    for i, chunk in enumerate(message["chunks"]):
+                        score = chunk.get("rerank_score", chunk.get("rrf_score", chunk.get("score", 0)))
+                        chunk_text = html.escape(chunk["text"]).replace("\n", "<br>")
+                        st.markdown(f"""
+                        <div class="context-card">
+                            <div class="context-title">Document {i+1}</div>
+                            <div class="context-score">Score: {score:.3f}</div>
+                            <div>{chunk_text}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+# --- EXECUTE RAG PIPELINE FUNCTION ---
+def execute_rag(user_input):
+    current_messages.append({"role": "user", "content": user_input})
+    save_chat(st.session_state.current_chat_id, current_messages)
+
+    # show user message immediately
+    render_user_bubble(user_input)
+
+    # assistant typing placeholder
+    assistant_placeholder = st.empty()
+    render_typing_indicator(assistant_placeholder)
+
+    history_for_rag = [{"role": m["role"], "content": m["content"]} for m in current_messages[:-1]]
+
+    try:
+        result = rag_pipeline.query(
+            user_query=user_input,
+            conversation_history=history_for_rag,
+            run_evaluation=True
+        )
+
+        answer = result["answer"]
+        chunks = result.get("retrieved_chunks", [])
+
+        f_val = result.get("faithfulness", {}).get("score")
+        r_val = result.get("relevancy", {}).get("score")
+        faithfulness = f"{f_val:.2%}" if isinstance(f_val, float) else "N/A"
+        relevancy = f"{r_val:.2%}" if isinstance(r_val, float) else "N/A"
+
+    except Exception as e:
+        answer = f"معذرت، ایک تکنیکی خرابی پیش آ گئی ہے۔ برائے مہربانی دوبارہ کوشش کریں۔\n\n(System Error: {str(e)})"
+        chunks, faithfulness, relevancy = [], "N/A", "N/A"
+
+    # replace typing indicator with streamed answer
+    stream_assistant_bubble(assistant_placeholder, answer, delay=0.01)
+
+    current_messages.append({
+        "role": "assistant",
+        "content": answer,
+        "chunks": chunks,
+        "faithfulness": faithfulness,
+        "relevancy": relevancy
+    })
+
+    save_chat(st.session_state.current_chat_id, current_messages)
+    time.sleep(0.2)
+    st.rerun()
+# --- HANDLE INPUTS ---
 if st.session_state.chip_prompt:
     prompt = st.session_state.chip_prompt
     st.session_state.chip_prompt = None
-    
-    # We grab the memory from Streamlit's synced state
-    current_messages = st.session_state.chat_sessions[st.session_state.current_chat_id]
-    
-    current_messages.append({"role": "user", "content": prompt})
-    current_messages.append({"role": "assistant", "content": "جواب یہاں آئے گا — آپ کا RAG سسٹم یہاں جڑے گا۔"})
-    
-    # SAVE IT!
-    save_chat(st.session_state.current_chat_id, current_messages)
-    st.rerun()
-# --- CHAT INPUT ---
+    execute_rag(prompt)
+
 if prompt := st.chat_input("اپنا قانونی سوال یہاں لکھیں..."):
-    current_messages.append({"role": "user", "content": prompt})
-    conversation_history = ""
-    for msg in current_messages[-5:]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        conversation_history += f"{role}: {msg['content']}\n"
-    # TODO: Pass 'conversation_history' + 'prompt' to your RAG pipeline
-    current_messages.append({"role": "assistant", "content": "جواب یہاں آئے گا — آپ کا RAG سسٹم یہاں جڑے گا۔"})
-    save_chat(st.session_state.current_chat_id, current_messages)
-    st.rerun()
+    execute_rag(prompt)
